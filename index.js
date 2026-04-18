@@ -74,35 +74,52 @@ app.post('/claude', async (req, res) => {
   }
 });
 
-app.post('/scrape', async (req, res) => {
-  try {
-    const { url, brand } = req.body;
-    if (!url) return res.status(400).json({ error: 'url is required' });
+function extractText(html) {
+  return html
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/[^\x20-\x7E\n]/g, '')
+    .trim();
+}
 
-    const pageResp = await axios.get(url, {
-      headers: { 'User-Agent': 'YarnTool/1.0 (yarn substitute finder; hello@yarnfood.com)' },
-      timeout: 10000
-    });
-    const html = pageResp.data;
+function extractProductLinks(html, baseUrl) {
+  const base = new URL(baseUrl);
+  const links = new Set();
+  const patterns = [
+    /href="([^"]*product-page[^"]*)"/gi,
+    /href="([^"]*\/products\/[^"]*)"/gi,
+    /href="([^"]*\/shop\/[^"]*yarn[^"]*)"/gi,
+    /href="([^"]*\/collections\/[^"]*\/products\/[^"]*)"/gi,
+  ];
+  for (const pattern of patterns) {
+    let match;
+    while ((match = pattern.exec(html)) !== null) {
+      try {
+        const url = new URL(match[1], base.origin);
+        if (url.hostname === base.hostname) links.add(url.href);
+      } catch(e) {}
+    }
+  }
+  return [...links].slice(0, 15);
+}
 
-    const text = html
-      .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
-      .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
-      .replace(/<[^>]+>/g, ' ')
-      .replace(/\s+/g, ' ')
-      .replace(/[^\x20-\x7E\n]/g, '')
-      .substring(0, 8000);
+async function scrapeYarnsFromPage(url, brand, anthropicKey) {
+  const pageResp = await axios.get(url, {
+    headers: { 'User-Agent': 'YarnTool/1.0 (yarn substitute finder; hello@yarnfood.com)' },
+    timeout: 10000
+  });
+  const text = extractText(pageResp.data).substring(0, 6000);
 
-    const prompt = `You are extracting yarn product data from a retailer's website page.
+  const prompt = `Extract yarn product data from this retailer page.
 
-Here is the page text:
+Page text:
 ${text}
 
-Extract all yarn products mentioned. For each yarn return structured data.
-If gauge is not listed, infer it from weight category and yardage.
-If needle size is not listed, infer from weight category.
+Return ONLY a valid JSON array. If this is not a yarn product page, return [].
+Infer gauge and needle size from weight/yardage if not stated.
 
-Return ONLY a valid JSON array, no markdown, no explanation:
 [{
   "name": "yarn name",
   "brand": "${brand || 'unknown'}",
@@ -117,25 +134,73 @@ Return ONLY a valid JSON array, no markdown, no explanation:
   "source": "indie"
 }]
 
-Only include actual yarn products. Exclude kits, advent boxes, pattern books, and accessories.`;
+Exclude kits, advent boxes, pattern books, accessories. Only real yarn products.`;
 
-    const claudeResp = await axios.post('https://api.anthropic.com/v1/messages', {
-      model: 'claude-haiku-4-5-20251001',
-      max_tokens: 2000,
-      messages: [{ role: 'user', content: prompt }]
-    }, {
-      headers: {
-        'x-api-key': ANTHROPIC_KEY,
-        'anthropic-version': '2023-06-01',
-        'content-type': 'application/json'
+  const claudeResp = await axios.post('https://api.anthropic.com/v1/messages', {
+    model: 'claude-haiku-4-5-20251001',
+    max_tokens: 1000,
+    messages: [{ role: 'user', content: prompt }]
+  }, {
+    headers: {
+      'x-api-key': anthropicKey,
+      'anthropic-version': '2023-06-01',
+      'content-type': 'application/json'
+    }
+  });
+
+  const responseText = claudeResp.data.content?.map(b => b.text || '').join('') || '[]';
+  const clean = responseText.replace(/```json|```/g, '').trim();
+  const jsonMatch = clean.match(/\[[\s\S]*\]/);
+  return jsonMatch ? JSON.parse(jsonMatch[0]) : [];
+}
+
+app.post('/scrape', async (req, res) => {
+  try {
+    const { url, brand } = req.body;
+    if (!url) return res.status(400).json({ error: 'url is required' });
+
+    console.log('Scraping:', url);
+
+    // First fetch the submitted URL
+    const pageResp = await axios.get(url, {
+      headers: { 'User-Agent': 'YarnTool/1.0 (yarn substitute finder; hello@yarnfood.com)' },
+      timeout: 10000
+    });
+    const html = pageResp.data;
+    const text = extractText(html).substring(0, 6000);
+
+    // Check if this looks like a product listing page
+    const productLinks = extractProductLinks(html, url);
+    console.log('Found product links:', productLinks.length);
+
+    let allYarns = [];
+
+    if (productLinks.length > 0) {
+      // It's a shop listing — scrape each product page
+      console.log('Auto-discovering product pages...');
+      const results = await Promise.allSettled(
+        productLinks.map(link => scrapeYarnsFromPage(link, brand, ANTHROPIC_KEY))
+      );
+      for (const result of results) {
+        if (result.status === 'fulfilled') {
+          allYarns = allYarns.concat(result.value);
+        }
       }
+    } else {
+      // It's a single product page — scrape directly
+      allYarns = await scrapeYarnsFromPage(url, brand, ANTHROPIC_KEY);
+    }
+
+    // Deduplicate by name
+    const seen = new Set();
+    const unique = allYarns.filter(y => {
+      if (!y.name || seen.has(y.name.toLowerCase())) return false;
+      seen.add(y.name.toLowerCase());
+      return true;
     });
 
-    const responseText = claudeResp.data.content?.map(b => b.text || '').join('') || '[]';
-    const clean = responseText.replace(/```json|```/g, '').trim();
-    const jsonMatch = clean.match(/\[[\s\S]*\]/);
-    const yarns = jsonMatch ? JSON.parse(jsonMatch[0]) : [];
-    res.json({ yarns, count: yarns.length });
+    console.log('Total yarns extracted:', unique.length);
+    res.json({ yarns: unique, count: unique.length, product_pages_scraped: productLinks.length });
 
   } catch (e) {
     console.error('Scrape error:', e.message);
