@@ -74,7 +74,7 @@ function inferGauge(weight) {
 }
 async function scrapeShopifyCollection(url, brand) {
   const base = new URL(url);
-  const jsonUrl = base.origin + base.pathname.replace(/\/$/, '') + '.json?limit=250';
+  const jsonUrl = base.origin + base.pathname.replace(/\/$/, '') + '/products.json?limit=250';
   const resp = await axios.get(jsonUrl, { headers: { 'User-Agent': 'YarnTool/1.0 (hello@yarnfood.com)' }, timeout: 15000 });
   const products = resp.data.products || [];
   return products.map(p => {
