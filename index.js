@@ -33,6 +33,17 @@ app.get('/yarns/search', async (req, res) => {
   }
 });
 
+app.get('/yarns/:id', async (req, res) => {
+  try {
+    const response = await axios.get(`https://api.ravelry.com/yarns/${req.params.id}.json`, {
+      auth: { username: RAVELRY_USER, password: RAVELRY_PASS }
+    });
+    res.json(response.data);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/patterns/search', async (req, res) => {
   try {
     const response = await axios.get('https://api.ravelry.com/patterns/search.json', {
