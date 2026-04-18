@@ -116,8 +116,8 @@ async function scrapePage(url, brand, type) {
 
 async function scrapeShopifyCollection(url, brand, type) {
   const base = new URL(url);
-  const collectionSlug = type === 'pattern' ? 'patterns' : url.split('/collections/')[1] || 'all';
-  const jsonUrl = base.origin + '/collections/' + collectionSlug + '/products.json?limit=250';
+  const collectionPath = base.pathname.replace(/\/$/, '');
+const jsonUrl = base.origin + collectionPath + '/products.json?limit=250';
   const resp = await axios.get(jsonUrl, { headers: { 'User-Agent': 'YarnTool/1.0 (hello@yarnfood.com)' }, timeout: 15000 });
   const products = resp.data.products || [];
 
