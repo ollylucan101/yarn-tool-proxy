@@ -84,6 +84,8 @@ async function scrapeShopifyCollection(url, brand) {
     const fibreMatch = desc.match(/(\d+%\s*[A-Za-z ]+)/g);
     const fibre = fibreMatch ? fibreMatch.slice(0, 3).join(', ') : '';
     const yardageMatch = desc.match(/(\d+)\s*m(?:etres?|eters?)?\s*(?:\/|per)\s*\d+g/i) || desc.match(/(\d+)\s*yards?\s*(?:\/|per)\s*\d+g/i);
+    const price = p.variants?.[0]?.price ? `£${parseFloat(p.variants[0].price).toFixed(2)}` : '';
+    const image = p.images?.[0]?.src || '';
     return {
       name: p.title,
       brand: brand || p.vendor || 'unknown',
@@ -94,6 +96,8 @@ async function scrapeShopifyCollection(url, brand) {
       texture: p.tags?.find(t => ['plied','singles','cord','spun','twisted'].some(k => t.toLowerCase().includes(k))) || '',
       care: desc.match(/hand\s?wash|machine\s?wash|dry\s?clean/i)?.[0] || '',
       yardage: yardageMatch ? yardageMatch[0] : '',
+      price,
+      image,
       shop_url: `${base.origin}/products/${p.handle}`,
       source: 'indie'
     };
@@ -101,7 +105,12 @@ async function scrapeShopifyCollection(url, brand) {
 }
 async function scrapeYarnsFromPage(url, brand) {
   const pageResp = await axios.get(url, { headers: { 'User-Agent': 'YarnTool/1.0 (hello@yarnfood.com)' }, timeout: 10000 });
-  const text = extractText(pageResp.data).substring(0, 6000);
+  const html = pageResp.data;
+  const text = extractText(html).substring(0, 6000);
+  const imageMatch = html.match(/<img[^>]+src="(https?:\/\/[^"]+(?:jpg|jpeg|png|webp))[^"]*"[^>]*>/i);
+  const image = imageMatch ? imageMatch[1] : '';
+  const priceMatch = text.match(/£\s*(\d+(?:\.\d{2})?)/);
+  const price = priceMatch ? `£${priceMatch[1]}` : '';
   const prompt = `Extract yarn product data from this page. Return ONLY a valid JSON array, no markdown. If not a yarn product page return [].
 Page: ${text}
 Format: [{"name":"yarn name","brand":"${brand || 'unknown'}","weight":"Lace|Fingering|Sport|DK|Worsted|Aran|Bulky|Super Bulky","needle_size":"e.g. 3.5mm","gauge":"e.g. 28 sts per 10cm","fibre":"e.g. 100% Wool","texture":"e.g. plied","care":"e.g. handwash","yardage":"e.g. 350m per 100g","shop_url":"${url}","source":"indie"}]
@@ -109,7 +118,8 @@ Exclude kits, advent boxes, patterns, accessories.`;
   const claudeResp = await axios.post('https://api.anthropic.com/v1/messages', { model: 'claude-haiku-4-5-20251001', max_tokens: 1000, messages: [{ role: 'user', content: prompt }] }, { headers: { 'x-api-key': ANTHROPIC_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' } });
   const responseText = claudeResp.data.content?.map(b => b.text || '').join('') || '[]';
   const jsonMatch = responseText.replace(/```json|```/g, '').trim().match(/\[[\s\S]*\]/);
-  return jsonMatch ? JSON.parse(jsonMatch[0]) : [];
+  const yarns = jsonMatch ? JSON.parse(jsonMatch[0]) : [];
+  return yarns.map(y => ({ ...y, image, price }));
 }
 app.post('/scrape', async (req, res) => {
   try {
