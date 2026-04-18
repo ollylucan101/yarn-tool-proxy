@@ -45,8 +45,7 @@ app.get('/patterns/search', async (req, res) => {
   }
 });
 
-app.post('/score', async (req, res) => {
-  try {
+app.post('/claude', async (req, res) => {  try {
     const response = await axios.post('https://api.anthropic.com/v1/messages', req.body, {
       headers: {
         'x-api-key': ANTHROPIC_KEY,
