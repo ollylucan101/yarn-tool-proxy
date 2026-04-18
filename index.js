@@ -74,5 +74,74 @@ app.post('/claude', async (req, res) => {
   }
 });
 
+app.post('/scrape', async (req, res) => {
+  try {
+    const { url, shop_url, brand } = req.body;
+    if (!url) return res.status(400).json({ error: 'url is required' });
+
+    // Fetch the page
+    const pageResp = await axios.get(url, {
+      headers: { 'User-Agent': 'YarnTool/1.0 (yarn substitute finder; hello@yarnfood.com)' },
+      timeout: 10000
+    });
+    const html = pageResp.data;
+
+    // Strip HTML tags to get plain text
+    const text = html
+      .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+      .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/\s+/g, ' ')
+      .substring(0, 8000);
+
+    // Ask Claude to extract yarn data
+    const prompt = `You are extracting yarn product data from a retailer's website page. 
+
+Here is the page text:
+${text}
+
+Extract all yarn products mentioned. For each yarn return structured data.
+If gauge is not listed, infer it from weight category and yardage.
+If needle size is not listed, infer from weight category.
+
+Return ONLY a valid JSON array, no markdown:
+[{
+  "name": "yarn name",
+  "brand": "${brand || 'unknown'}",
+  "weight": "Lace|Fingering|Sport|DK|Worsted|Aran|Bulky|Super Bulky",
+  "needle_size": "e.g. 3.5mm or range like 3-3.5mm",
+  "gauge": "e.g. 28 sts per 10cm",
+  "fibre": "e.g. 100% Wensleydale Wool",
+  "texture": "e.g. plied, singles, woollen spun",
+  "care": "e.g. handwash only",
+  "yardage": "e.g. 350m per 100g",
+  "shop_url": "${shop_url || url}",
+  "source": "indie"
+}]
+
+Only include actual yarn products, not kits, advent boxes, pattern books, or accessories.`;
+
+    const claudeResp = await axios.post('https://api.anthropic.com/v1/messages', {
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 2000,
+      messages: [{ role: 'user', content: prompt }]
+    }, {
+      headers: {
+        'x-api-key': ANTHROPIC_KEY,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json'
+      }
+    });
+
+    const responseText = claudeResp.data.content?.map(b => b.text || '').join('') || '[]';
+    const yarns = JSON.parse(responseText.replace(/```json|```/g, '').trim());
+    res.json({ yarns, count: yarns.length });
+
+  } catch (e) {
+    console.error('Scrape error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Proxy running on port ${PORT}`));
