@@ -47,6 +47,7 @@ app.get('/patterns/search', async (req, res) => {
 
 app.post('/claude', async (req, res) => {
   try {
+    console.log('Claude request received, key prefix:', ANTHROPIC_KEY ? ANTHROPIC_KEY.substring(0, 10) : 'missing');
     const response = await axios.post('https://api.anthropic.com/v1/messages', req.body, {
       headers: {
         'x-api-key': ANTHROPIC_KEY,
@@ -56,6 +57,8 @@ app.post('/claude', async (req, res) => {
     });
     res.json(response.data);
   } catch (e) {
+    console.error('Claude error status:', e.response?.status);
+    console.error('Claude error data:', JSON.stringify(e.response?.data));
     res.status(500).json({ error: e.message, details: e.response?.data });
   }
 });
