@@ -11,6 +11,16 @@ const RAVELRY_USER = process.env.RAVELRY_USER;
 const RAVELRY_PASS = process.env.RAVELRY_PASS;
 const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
 
+app.get('/test', (req, res) => {
+  res.json({ 
+    status: 'ok',
+    has_ravelry_user: !!RAVELRY_USER,
+    has_ravelry_pass: !!RAVELRY_PASS,
+    has_anthropic_key: !!ANTHROPIC_KEY,
+    anthropic_key_prefix: ANTHROPIC_KEY ? ANTHROPIC_KEY.substring(0, 10) : 'missing'
+  });
+});
+
 app.get('/yarns/search', async (req, res) => {
   try {
     const response = await axios.get('https://api.ravelry.com/yarns/search.json', {
@@ -46,7 +56,7 @@ app.post('/score', async (req, res) => {
     });
     res.json(response.data);
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: e.message, details: e.response?.data });
   }
 });
 
