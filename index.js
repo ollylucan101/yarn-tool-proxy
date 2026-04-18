@@ -83,10 +83,14 @@ Page: ${text}
 Format: [{"name":"","brand":"${brand||'unknown'}","weight":"Lace|Fingering|Sport|DK|Worsted|Aran|Bulky|Super Bulky","needle_size":"","gauge":"","fibre":"","texture":"","care":"","yardage":"","shop_url":"${url}","source":"indie"}]
 Exclude kits, advent boxes, accessories. Only actual yarn.`;
   } else {
-    prompt = `Extract knitting or crochet patterns from this page. Return ONLY valid JSON array, no markdown. If no patterns return [].
+    prompt = `This is a product page from a small British yarn producer. Extract knitting or crochet pattern details if this page is selling a pattern (PDF download, printed pattern, or digital pattern).
+
 Page: ${text}
-Format: [{"name":"","designer":"${brand||'unknown'}","craft":"knitting|crochet","difficulty":"beginner|intermediate|advanced","yarn_weight":"","yardage_required":"","price":"","free":false,"description":"1 sentence","pattern_url":"${url}","source":"indie"}]
-Exclude yarn products, kits, books. Only actual knitting/crochet patterns.`;
+
+A pattern page will typically mention: a garment or project type (cowl, sweater, socks, hat, shawl etc), yarn requirements, needle size, difficulty, and a price for a PDF or download.
+
+Return ONLY valid JSON array, no markdown. If this is NOT a pattern page return [].
+[{"name":"pattern name","designer":"${brand||'unknown'}","craft":"knitting|crochet","difficulty":"beginner|intermediate|advanced","yarn_weight":"e.g. DK, Worsted","yardage_required":"e.g. 200m","price":"e.g. £5.00","free":false,"description":"1 sentence about what the pattern makes","pattern_url":"${url}","source":"indie"}]`;
   }
   const resp = await axios.post('https://api.anthropic.com/v1/messages', {
     model: 'claude-haiku-4-5-20251001',
@@ -98,7 +102,7 @@ Exclude yarn products, kits, books. Only actual knitting/crochet patterns.`;
   return match ? JSON.parse(match[0]) : [];
 }
 
-async function scrapePage(url, brand) {
+async function scrapePage(url, brand, type) {
   const pageResp = await axios.get(url, { headers: { 'User-Agent': 'YarnTool/1.0 (hello@yarnfood.com)' }, timeout: 10000 });
   const html = pageResp.data;
   const text = extractText(html).substring(0, 6000);
@@ -106,23 +110,27 @@ async function scrapePage(url, brand) {
   const image = imageMatch ? imageMatch[1] : '';
   const priceMatch = text.match(/£\s*(\d+(?:\.\d{2})?)/);
   const price = priceMatch ? `£${priceMatch[1]}` : '';
-  const [yarns, patterns] = await Promise.all([
-    claudeExtract(text, brand, url, 'yarn'),
-    claudeExtract(text, brand, url, 'pattern')
-  ]);
-  return {
-    yarns: yarns.map(y => ({ ...y, image, price })),
-    patterns
-  };
+  const items = await claudeExtract(text, brand, url, type);
+  return items.map(y => ({ ...y, image, price: y.price || price }));
 }
 
-async function scrapeShopifyCollection(url, brand) {
+async function scrapeShopifyCollection(url, brand, type) {
   const base = new URL(url);
-  const jsonUrl = base.origin + base.pathname.replace(/\/$/, '') + '/products.json?limit=250';
+  const collectionSlug = type === 'pattern' ? 'patterns' : url.split('/collections/')[1] || 'all';
+  const jsonUrl = base.origin + '/collections/' + collectionSlug + '/products.json?limit=250';
   const resp = await axios.get(jsonUrl, { headers: { 'User-Agent': 'YarnTool/1.0 (hello@yarnfood.com)' }, timeout: 15000 });
   const products = resp.data.products || [];
 
-  const yarns = products.map(p => {
+  if (type === 'pattern') {
+    return products.map(p => {
+      const desc = (p.body_html || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').replace(/[^\x20-\x7E]/g, '').trim();
+      const isFree = parseFloat(p.variants?.[0]?.price || '1') === 0;
+      const price = p.variants?.[0]?.price ? `£${parseFloat(p.variants[0].price).toFixed(2)}` : '';
+      return { name: p.title, designer: brand || p.vendor || 'unknown', craft: desc.toLowerCase().includes('crochet') ? 'crochet' : 'knitting', difficulty: desc.toLowerCase().includes('beginner') ? 'beginner' : desc.toLowerCase().includes('advanced') ? 'advanced' : 'intermediate', yarn_weight: inferWeight(desc + ' ' + p.title), yardage_required: (desc.match(/(\d+\s*m)/i) || [])[0] || '', price, free: isFree, description: p.title, pattern_url: `${base.origin}/products/${p.handle}`, source: 'indie' };
+    }).filter(p => p.name);
+  }
+
+  return products.map(p => {
     const desc = (p.body_html || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').replace(/[^\x20-\x7E]/g, '').trim();
     const allText = (p.tags?.join(' ') || '') + ' ' + desc + ' ' + p.title;
     const weight = inferWeight(allText);
@@ -133,37 +141,19 @@ async function scrapeShopifyCollection(url, brand) {
     const image = p.images?.[0]?.src || '';
     return { name: p.title, brand: brand || p.vendor || 'unknown', weight, needle_size: inferNeedle(weight), gauge: inferGauge(weight), fibre, texture: p.tags?.find(t => ['plied','singles','cord','spun','twisted'].some(k => t.toLowerCase().includes(k))) || '', care: desc.match(/hand\s?wash|machine\s?wash|dry\s?clean/i)?.[0] || '', yardage: yardageMatch ? yardageMatch[0] : '', price, image, shop_url: `${base.origin}/products/${p.handle}`, source: 'indie' };
   }).filter(y => y.name);
-
-  // Also check for a patterns collection on Shopify
-  let patterns = [];
-  try {
-    const patternUrl = base.origin + '/collections/patterns/products.json?limit=100';
-    const pr = await axios.get(patternUrl, { headers: { 'User-Agent': 'YarnTool/1.0 (hello@yarnfood.com)' }, timeout: 10000 });
-    if (pr.data.products && pr.data.products.length) {
-      patterns = pr.data.products.map(p => {
-        const desc = (p.body_html || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').replace(/[^\x20-\x7E]/g, '').trim();
-        const isFree = parseFloat(p.variants?.[0]?.price || '0') === 0;
-        const price = p.variants?.[0]?.price ? `£${parseFloat(p.variants[0].price).toFixed(2)}` : '';
-        return { name: p.title, designer: brand || p.vendor || 'unknown', craft: desc.toLowerCase().includes('crochet') ? 'crochet' : 'knitting', difficulty: desc.toLowerCase().includes('beginner') ? 'beginner' : desc.toLowerCase().includes('advanced') ? 'advanced' : 'intermediate', yarn_weight: inferWeight(desc + ' ' + p.title), yardage_required: (desc.match(/(\d+)\s*m/i) || [])[0] || '', price, free: isFree, description: p.title, pattern_url: `${base.origin}/products/${p.handle}`, source: 'indie' };
-      }).filter(p => p.name);
-    }
-  } catch(e) { /* no patterns collection */ }
-
-  return { yarns, patterns };
 }
 
 app.post('/scrape', async (req, res) => {
   try {
-    const { url, brand } = req.body;
+    const { url, brand, type } = req.body;
     if (!url) return res.status(400).json({ error: 'url is required' });
-    console.log('Scraping:', url);
-    let allYarns = [], allPatterns = [], method = 'unknown', productPageCount = 0;
+    const scrapeType = type || 'yarn';
+    console.log('Scraping:', url, 'type:', scrapeType);
+    let allItems = [], method = 'unknown';
 
     if (url.includes('/collections/')) {
       method = 'shopify';
-      const result = await scrapeShopifyCollection(url, brand);
-      allYarns = result.yarns;
-      allPatterns = result.patterns;
+      allItems = await scrapeShopifyCollection(url, brand, scrapeType);
     } else {
       const pageResp = await axios.get(url, { headers: { 'User-Agent': 'YarnTool/1.0 (hello@yarnfood.com)' }, timeout: 10000 });
       const html = pageResp.data;
@@ -171,31 +161,23 @@ app.post('/scrape', async (req, res) => {
       console.log('Product links found:', productLinks.length);
       if (productLinks.length > 0) {
         method = 'product-pages';
-        productPageCount = productLinks.length;
-        const results = await Promise.allSettled(productLinks.map(link => scrapePage(link, brand)));
-        for (const r of results) {
-          if (r.status === 'fulfilled') {
-            allYarns = allYarns.concat(r.value.yarns);
-            allPatterns = allPatterns.concat(r.value.patterns);
-          }
-        }
+        const results = await Promise.allSettled(productLinks.map(link => scrapePage(link, brand, scrapeType)));
+        for (const r of results) { if (r.status === 'fulfilled') allItems = allItems.concat(r.value); }
       } else {
         method = 'single-page';
-        const result = await scrapePage(url, brand);
-        allYarns = result.yarns;
-        allPatterns = result.patterns;
+        allItems = await scrapePage(url, brand, scrapeType);
       }
     }
 
-    const dedup = (arr, key) => {
-      const seen = new Set();
-      return arr.filter(y => { if (!y[key] || seen.has(y[key].toLowerCase())) return false; seen.add(y[key].toLowerCase()); return true; });
-    };
+    const seen = new Set();
+    const unique = allItems.filter(y => { if (!y.name || seen.has(y.name.toLowerCase())) return false; seen.add(y.name.toLowerCase()); return true; });
+    console.log('Items extracted:', unique.length, 'method:', method);
 
-    const uniqueYarns = dedup(allYarns, 'name');
-    const uniquePatterns = dedup(allPatterns, 'name');
-    console.log('Yarns:', uniqueYarns.length, 'Patterns:', uniquePatterns.length, 'method:', method);
-    res.json({ yarns: uniqueYarns, patterns: uniquePatterns, yarn_count: uniqueYarns.length, pattern_count: uniquePatterns.length, method });
+    if (scrapeType === 'pattern') {
+      res.json({ patterns: unique, pattern_count: unique.length, method });
+    } else {
+      res.json({ yarns: unique, yarn_count: unique.length, method });
+    }
   } catch (e) {
     console.error('Scrape error:', e.message);
     res.status(500).json({ error: e.message });
